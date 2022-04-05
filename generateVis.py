@@ -1,19 +1,37 @@
 
-##generateVis
-##code sources: https://github.com/pavel-perina/gpx_to_png
+####generateVis
+####code sources: https://github.com/pavel-perina/gpx_to_png
 
 import sys  
 import math 
 import logging 
 import urllib
-import os 
+import os
 import io
 import base64
 import gpxpy
 from PIL import Image as pil_image
+from PIL import ImageFilter as pil_filter
 from PIL import ImageDraw as pil_draw
+from PIL import ImageFont as pil_font
+print(os.getcwd())
+from PIL.ImageFilter import (
+   BLUR, CONTOUR, DETAIL, EDGE_ENHANCE, EDGE_ENHANCE_MORE,
+   EMBOSS, FIND_EDGES, SMOOTH, SMOOTH_MORE, SHARPEN
+)
 
-####osm functions taken from https://github.com/pavel-perina/gpx_to_png
+def get_black_pixels(im):
+    width, height = im.size
+    blackPixels = []
+    for x in range(width):
+        for y in range(height):
+            color = im.getpixel((x,y))
+            if color < 200: #check for pixels that are not white
+                blackPixels.append({"x":x,"y":y})
+    return blackPixels
+ 
+
+##osm functions taken from https://github.com/pavel-perina/gpx_to_png
 def osm_lat_lon_to_x_y_tile (lat_deg, lon_deg, zoom):
     """ Gets tile containing given coordinate at given zoom level """
     ## taken from http://wiki.openstreetmap.org/wiki/Slippy_map_tilenames, works for OSM maps and mapy.cz
@@ -48,28 +66,84 @@ def get_dimensions(n):
 
 ##this class is the canvas that the activities(tracks) will be drawn on.
 class ImageCreator:
-    def __init__(self, tracks, lineThickness, gridOn, backgroundColor, foregroundColor, gridColor, title):
+    def __init__(self, tracks, lineThickness = 5, backgroundColor = (255,255,255), backgroundImage = None, backgroundBlur = 5, foregroundColor = (0,0,0), gridOn = False, gridColor = (255,255,255), gridThickness = 1,  title = "", blackWhiteImage = None, textBackgroundFade = False, infoText = False, totalTime = "", totalDistance = ""):
         
         self.tracks = tracks
         
         ##sizing##
         resolution = 4000
         self.maxTileWidth = resolution/(self.get_max_track_width())
-        self.maxRows = get_dimensions(len(tracks))
+        if blackWhiteImage==None: 
+            self.maxRows = get_dimensions(len(tracks))
+        else:
+            self.maxRows = blackWhiteImage.height
         self.width = resolution #500 * self.maxRows
         self.height = self.width
         self.tile_res = self.maxTileWidth/self.maxRows
         #(resolution/2)*(self.maxTileWidth) #resolution of drawn tracks #6*(self.width/1000)
         self.gridElementSize = self.width / self.maxRows
-
+        print("Max track width: " + str(self.get_max_track_width()))
+        print("Max tile width: " + str(self.maxTileWidth))
+        
         ##user parameters##
         self.lineThickness = lineThickness 
         self.gridColor = gridColor
         self.foregroundColor = foregroundColor
         self.gridOn = gridOn
+        self.gridThickness = gridThickness
 
-        self.image = pil_image.new ("RGB", (self.width, self.height), backgroundColor)
+
+
+        ####background image####
+
+       
+        if backgroundImage!=None:
+            ##resize and crop image to fit##
+            if(backgroundImage.width < resolution or backgroundImage.height < resolution):
+                if(backgroundImage.width>backgroundImage.height):
+                    backgroundImage = backgroundImage.resize((backgroundImage.width*(math.ceil(resolution/backgroundImage.height)),resolution))
+                else:
+                    backgroundImage = backgroundImage.resize((resolution,backgroundImage.height*(math.ceil(resolution/backgroundImage.width))))
+            backgroundImage = backgroundImage.crop(((backgroundImage.width-resolution)/2,(backgroundImage.height-resolution)/2, (backgroundImage.width+resolution)/2,(backgroundImage.height+resolution)/2))
+            backgroundImage = backgroundImage.filter(pil_filter.GaussianBlur(20))
+            backgroundImage = backgroundImage.convert("RGBA")
+            self.image = backgroundImage
+        else:
+            self.image = pil_image.new ("RGBA", (self.width, self.height), backgroundColor)
+
+        ###extra image additions####
+        if(textBackgroundFade == True):
+            fade = pil_image.open("fade.png").resize((resolution,resolution))
+            self.image = pil_image.alpha_composite(self.image, fade)
+
+        if (self.gridOn==True): 
+            self.draw_grid()
+
+        if (infoText==True):
+           self.draw_text("activities",str(self.get_tracks_length())) #str(image_creator.get_tracks_length())
+        
           
+    def draw_text(self,label="",text=""):
+        draw = pil_draw.Draw(self.image)
+        textFont = pil_font.truetype('arial.ttf', int(self.width/13)) #300
+        labelFont = pil_font.truetype('arial.ttf', int(self.width/30)) #130
+        
+        # calculate the x,y coordinates of the text
+        textwidth, textheight = draw.textsize(text, textFont)
+        labelwidth, labelheight = draw.textsize(label, labelFont)
+        margin = self.width/40 #self.width is resolution
+        
+        textx = self.image.width - textwidth - margin
+        texty = self.image.height - textheight - margin
+
+        labelx = (textx + textwidth/2)-(labelwidth/2) #+ math.ceil(textwidth*.05)
+        labely = texty-(textheight/2)
+        
+        
+        draw.text((textx, texty), text, font=textFont, align='center') #align='center'
+        draw.text((labelx, labely), label, font=labelFont)
+        
+        del draw
     def draw_grid(self):
         step_count = self.maxRows
         # Draw some lines
@@ -79,16 +153,14 @@ class ImageCreator:
         step_size = int(self.image.width / step_count)
         for x in range(0, self.image.width, step_size):
             line = ((x, y_start), (x, y_end))
-            draw.line(line, fill=self.gridColor)
+            draw.line(line, fill=self.gridColor, width=self.gridThickness)
         x_start = 0
         x_end = self.image.width
         for y in range(0, self.image.height, step_size):
             line = ((x_start, y), (x_end, y))
-            draw.line(line, fill=self.gridColor)
+            draw.line(line, fill=self.gridColor, width=self.gridThickness)
         del draw
     def draw_facets(self):
-        if (self.gridOn==True): 
-            self.draw_grid()
         row = 0
         column = 0
         gridElementSize = self.width / self.maxRows
@@ -103,7 +175,32 @@ class ImageCreator:
 
             track.draw_track((self.gridElementSize*column)+centerxOffset,(self.gridElementSize*row) + centeryOffset,self.image, self.tile_res, self.lineThickness, self.foregroundColor)
             column+=1
+        self.image = self.image.filter(SMOOTH_MORE)
+
+    def draw_shape(self, blackPxSequence):
+
+        step_count = self.maxRows
+        row = 0
+        column = 0
+        blackPxLength = len(blackPxSequence)
+        gridElementSize = self.width / self.maxRows
+        y_start = 0
+        y_end = self.image.height
+        step_size = int(self.image.width / step_count)
+        #for i in range(len(self.tracks)):
+        j = 0
+        for i in range(len(blackPxSequence)):
+            if i < blackPxLength: 
+                pixel = blackPxSequence[i]
+                #print("drawing track " + str(i) + "at x:" + str(self.gridElementSize*pixel["y"]) + " y: " + str(self.gridElementSize*pixel["x"]))
+                self.tracks[j].draw_track((self.gridElementSize*pixel["x"]),(self.gridElementSize*pixel["y"]),self.image, self.tile_res, self.lineThickness, self.foregroundColor)
+            else:
+                break
+            j+=1
+            if j >= len(self.tracks):
+                j = 0
             
+    
     def save_image(self, filename = ""):
         if filename != "":
             self.image.save (filename)
@@ -123,10 +220,14 @@ class ImageCreator:
                 maxWidth = width
         #print("max width of track: " + str(maxWidth))
         return maxWidth
+    
+    def get_tracks_length(self):
+        return(len(self.tracks))
+        
         
             
 
-#activity. only stores GPX data at the moment. eventually should also have data such as activity name, time, distance, etc....          
+    #activity. only stores GPX data at the moment. eventually should also have data such as activity name, time, distance, etc....          
 class Track:
     def __init__(self, activity, min_lat, max_lat, min_lon, max_lon, zoom):
         """ constructor """
@@ -215,43 +316,69 @@ def gpx_to_list(gpx):
             
 
 
-def getVis(data = [], lineThickness = 10, gridOn = False, backgroundColor = (255,255,255), foregroundColor = (0,0,0), gridColor = (0,0,0), title = ""): 
+def getVis(data, lineThickness = 5, backgroundColor = (255,255,255), backgroundImage = None, backgroundBlur = 5, foregroundColor = (0,0,0), gridOn = False, gridColor = (0,0,0), gridThickness = 1,  title = "", blackWhiteImage = None, textBackgroundFade = False, infoText = False, totalTime = "", totalDistance = ""): 
+    """ Program entry point """
+    
+    
     tracks = []
+    countLimit = 2000 #temporary
+    count = 0
+    
     #####POLYLINE LIST####
-    if len(data) > 0:
-        if (type(data[0][0]) is tuple): #very rough way to check if it is a polyline list or a GPX file
-            for activity in data:
-                try:
-                    min_lat, max_lat, min_lon, max_lon = get_latlon_bounds(activity)
-                    zoom = osm_get_auto_zoom_level (min_lat, max_lat, min_lon, max_lon, 6)
-                    track = Track(activity, min_lat, max_lat, min_lon, max_lon, zoom)
-                    tracks.append(track)
-                except Exception as e:
-                    logging.exception(e)
-                    print("Error processing polyline")
-                    sys.exit(1)
-                    
-        #####GPX FILE#####
-        ##convert GPX file to list
-        else:
-            print(data, len(data))
-            for gpx_file in data:
+    if (type(data[0][0]) is tuple): #very rough way to check if it is a polyline list or a GPX file
+        for activity in data:
+            try:
+                min_lat, max_lat, min_lon, max_lon = get_latlon_bounds(activity)
+                #print(get_latlon_bounds(activity))
+                zoom = osm_get_auto_zoom_level (min_lat, max_lat, min_lon, max_lon, 1)
+                track = Track(activity, min_lat, max_lat, min_lon, max_lon, zoom)
+                tracks.append(track)
+            except Exception as e:
+                logging.exception(e)
+                print("Error processing polyline")
+                sys.exit(1)
+    #####GPX FILE#####
+    ##convert GPX file to list
+    else:
+        print("GPX File")
+        gpx_files = glob.glob (r"*.gpx") #get all GPX files in same directory
+        
+        for gpx_file in gpx_files:
+            if count != countLimit:
+                count+=1
                 try:
                     gpx = gpxpy.parse(open(gpx_file))
                     
                     #start_time, end_time = gpx.get_time_bounds()
-                    min_lat, max_lat, min_lon, max_lon = gpx.get_bounds()
-                    zoom = osm_get_auto_zoom_level (min_lat, max_lat, min_lon, max_lon, 6)
+                    #min_lat, max_lat, min_lon, max_lon = gpx.get_bounds()
+                    
                     activity = gpx_to_list(gpx)
+                    min_lat, max_lat, min_lon, max_lon = get_latlon_bounds(activity)
+                    zoom = osm_get_auto_zoom_level (min_lat, max_lat, min_lon, max_lon, 1)
                     track = Track(activity, min_lat, max_lat, min_lon, max_lon, zoom)
                     tracks.append(track)
+
                 except Exception as e:
+
                     logging.exception(e)
                     print('Error processing: %s' % gpx_file)
                     sys.exit(1)
+            else:
+                break
 
-        
-    image_creator = ImageCreator(tracks, lineThickness, gridOn, backgroundColor, foregroundColor, gridColor, title)
-    image_creator.draw_facets()
+    blackPixels = []
+    maxRows = 0 #set to 0 for imagecreator to automatically set height
+    if blackWhiteImage!=None:
+         blackPixels = get_black_pixels(blackWhiteImage)
+         print("black pixels: " + str(len(blackPixels)))
+         
+    image_creator = ImageCreator(tracks, lineThickness, backgroundColor, backgroundImage, backgroundBlur, foregroundColor, gridOn, gridColor, gridThickness,  title, blackWhiteImage, textBackgroundFade, infoText, totalTime, totalDistance)
+    
+    if blackWhiteImage != None:
+        image_creator.draw_shape(blackPixels)
+    else:
+        image_creator.draw_facets()
+
     return(image_creator.save_image())
+
 
